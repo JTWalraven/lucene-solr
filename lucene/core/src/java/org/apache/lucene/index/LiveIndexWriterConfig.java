@@ -113,6 +113,7 @@ public class LiveIndexWriterConfig {
   /** soft deletes field */
   protected String softDeletesField = null;
 
+
   // used by IndexWriterConfig
   LiveIndexWriterConfig(Analyzer analyzer) {
     this.analyzer = analyzer;

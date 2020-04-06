@@ -54,7 +54,7 @@ import org.apache.lucene.util.Version;
  * segments in relation to the file system.
  * <p>
  * The active segments in the index are stored in the segment info file,
- * <tt>segments_N</tt>. There may be one or more <tt>segments_N</tt> files in
+ * <code>segments_N</code>. There may be one or more <code>segments_N</code> files in
  * the index; however, the one with the largest generation is the active one
  * (when older segments_N files are present it's because they temporarily cannot
  * be deleted, or a custom {@link IndexDeletionPolicy} is in
@@ -64,7 +64,7 @@ import org.apache.lucene.util.Version;
  * <p>
  * Files:
  * <ul>
- * <li><tt>segments_N</tt>: Header, LuceneVersion, Version, NameCounter, SegCount, MinSegmentLuceneVersion, &lt;SegName,
+ * <li><code>segments_N</code>: Header, LuceneVersion, Version, NameCounter, SegCount, MinSegmentLuceneVersion, &lt;SegName,
  * SegID, SegCodec, DelGen, DeletionCount, FieldInfosGen, DocValuesGen,
  * UpdatesFiles&gt;<sup>SegCount</sup>, CommitUserData, Footer
  * </ul>
@@ -125,6 +125,9 @@ public final class SegmentInfos implements Cloneable, Iterable<SegmentCommitInfo
   /** The version that recorded softDelCount */
   public static final int VERSION_74 = 9;
   static final int VERSION_CURRENT = VERSION_74;
+
+  /** Name of the generation reference file name */
+  private static final String OLD_SEGMENTS_GEN = "segments.gen";
 
   /** Used to name new segments. */
   public long counter;
@@ -187,7 +190,9 @@ public final class SegmentInfos implements Cloneable, Iterable<SegmentCommitInfo
   public static long getLastCommitGeneration(String[] files) {
     long max = -1;
     for (String file : files) {
-      if (file.startsWith(IndexFileNames.SEGMENTS) && !file.equals(IndexFileNames.OLD_SEGMENTS_GEN)) {
+      if (file.startsWith(IndexFileNames.SEGMENTS) &&
+          // skipping this file here helps deliver the right exception when opening an old index
+          file.startsWith(OLD_SEGMENTS_GEN) == false) {
         long gen = generationFromSegmentsFileName(file);
         if (gen > max) {
           max = gen;
@@ -246,7 +251,9 @@ public final class SegmentInfos implements Cloneable, Iterable<SegmentCommitInfo
    * return it.
    */
   public static long generationFromSegmentsFileName(String fileName) {
-    if (fileName.equals(IndexFileNames.SEGMENTS)) {
+    if (fileName.equals(OLD_SEGMENTS_GEN)) {
+      throw new IllegalArgumentException("\"" + OLD_SEGMENTS_GEN + "\" is not a valid segment file name since 4.0");
+    } else if (fileName.equals(IndexFileNames.SEGMENTS)) {
       return 0;
     } else if (fileName.startsWith(IndexFileNames.SEGMENTS)) {
       return Long.parseLong(fileName.substring(1+IndexFileNames.SEGMENTS.length()),

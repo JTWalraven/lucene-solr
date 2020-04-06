@@ -31,12 +31,12 @@ import org.apache.lucene.util.BytesRef;
  *
  * @lucene.internal
  * */
-public final class OfflinePointReader extends PointReader {
+public final class OfflinePointReader implements PointReader {
 
   long countLeft;
   final IndexInput in;
   byte[] onHeapBuffer;
-  private int offset;
+  int offset;
   final int bytesPerDoc;
   private boolean checked;
   private final int packedValueLength;
@@ -44,6 +44,7 @@ public final class OfflinePointReader extends PointReader {
   private final int maxPointOnHeap;
   // File name we are reading
   final String name;
+  private final OfflinePointValue pointValue;
 
   public OfflinePointReader(Directory tempDir, String tempFileName, int packedBytesLength, long start, long length, byte[] reusableBuffer) throws IOException {
     this.bytesPerDoc = packedBytesLength + Integer.BYTES;
@@ -79,6 +80,7 @@ public final class OfflinePointReader extends PointReader {
     in.seek(seekFP);
     countLeft = length;
     this.onHeapBuffer = reusableBuffer;
+    this.pointValue = new OfflinePointValue(onHeapBuffer, packedValueLength);
   }
 
   @Override
@@ -112,23 +114,9 @@ public final class OfflinePointReader extends PointReader {
   }
 
   @Override
-  public void packedValue(BytesRef bytesRef) {
-    bytesRef.bytes = onHeapBuffer;
-    bytesRef.offset = offset;
-    bytesRef.length = packedValueLength;
-  }
-
-  protected void packedValueWithDocId(BytesRef bytesRef) {
-    bytesRef.bytes = onHeapBuffer;
-    bytesRef.offset = offset;
-    bytesRef.length = bytesPerDoc;
-  }
-
-  @Override
-  public int docID() {
-    int position = this.offset + packedValueLength;
-    return ((onHeapBuffer[position++] & 0xFF) << 24) | ((onHeapBuffer[position++] & 0xFF) << 16)
-        | ((onHeapBuffer[position++] & 0xFF) <<  8) |  (onHeapBuffer[position++] & 0xFF);
+  public PointValue pointValue() {
+    pointValue.setOffset(offset);
+   return pointValue;
   }
 
   @Override
@@ -143,5 +131,47 @@ public final class OfflinePointReader extends PointReader {
       in.close();
     }
   }
+
+  /**
+   * Reusable implementation for a point value offline
+   */
+  static class OfflinePointValue implements PointValue {
+
+    final BytesRef packedValue;
+    final BytesRef packedValueDocID;
+    final int packedValueLength;
+
+    OfflinePointValue(byte[] value, int packedValueLength) {
+      this.packedValueLength = packedValueLength;
+      this.packedValue = new BytesRef(value, 0, packedValueLength);
+      this.packedValueDocID = new BytesRef(value, 0, packedValueLength + Integer.BYTES);
+    }
+
+    /**
+     * Sets a new value by changing the offset.
+     */
+    public void setOffset(int offset) {
+      packedValue.offset = offset;
+      packedValueDocID.offset = offset;
+    }
+
+    @Override
+    public BytesRef packedValue() {
+      return packedValue;
+    }
+
+    @Override
+    public int docID() {
+      int position = packedValueDocID.offset + packedValueLength;
+      return ((packedValueDocID.bytes[position] & 0xFF) << 24) | ((packedValueDocID.bytes[++position] & 0xFF) << 16)
+          | ((packedValueDocID.bytes[++position] & 0xFF) <<  8) |  (packedValueDocID.bytes[++position] & 0xFF);
+    }
+
+    @Override
+    public BytesRef packedValueDocIDBytes() {
+      return packedValueDocID;
+    }
+  }
+
 }
 

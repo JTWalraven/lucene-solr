@@ -52,7 +52,6 @@ import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.BytesRefHash;
 import org.apache.lucene.util.BytesRefHash.DirectBytesStartArray;
 import org.apache.lucene.util.Counter;
-import org.apache.lucene.util.FutureArrays;
 import org.apache.lucene.util.IntBlockPool;
 import org.apache.lucene.util.IntBlockPool.SliceReader;
 import org.apache.lucene.util.IntBlockPool.SliceWriter;
@@ -411,7 +410,7 @@ public class MemoryIndex {
       storeDocValues(info, docValuesType, docValuesValue);
     }
 
-    if (field.fieldType().pointDataDimensionCount() > 0) {
+    if (field.fieldType().pointDimensionCount() > 0) {
       storePointValues(info, field.binaryValue());
     }
 
@@ -487,9 +486,9 @@ public class MemoryIndex {
     if (info == null) {
       fields.put(fieldName, info = new Info(createFieldInfo(fieldName, fields.size(), fieldType), byteBlockPool));
     }
-    if (fieldType.pointDataDimensionCount() != info.fieldInfo.getPointDataDimensionCount()) {
-      if (fieldType.pointDataDimensionCount() > 0)
-        info.fieldInfo.setPointDimensions(fieldType.pointDataDimensionCount(), fieldType.pointIndexDimensionCount(), fieldType.pointNumBytes());
+    if (fieldType.pointDimensionCount() != info.fieldInfo.getPointDimensionCount()) {
+      if (fieldType.pointDimensionCount() > 0)
+        info.fieldInfo.setPointDimensions(fieldType.pointDimensionCount(), fieldType.pointIndexDimensionCount(), fieldType.pointNumBytes());
     }
     if (fieldType.docValuesType() != info.fieldInfo.getDocValuesType()) {
       if (fieldType.docValuesType() != DocValuesType.NONE)
@@ -502,7 +501,7 @@ public class MemoryIndex {
     IndexOptions indexOptions = storeOffsets ? IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS : IndexOptions.DOCS_AND_FREQS_AND_POSITIONS;
     return new FieldInfo(fieldName, ord, fieldType.storeTermVectors(), fieldType.omitNorms(), storePayloads,
         indexOptions, fieldType.docValuesType(), -1, Collections.emptyMap(),
-        fieldType.pointDataDimensionCount(), fieldType.pointIndexDimensionCount(), fieldType.pointNumBytes(), false);
+        fieldType.pointDimensionCount(), fieldType.pointIndexDimensionCount(), fieldType.pointNumBytes(), false);
   }
 
   private void storePointValues(Info info, BytesRef pointValue) {
@@ -521,7 +520,7 @@ public class MemoryIndex {
       info.fieldInfo = new FieldInfo(
           info.fieldInfo.name, info.fieldInfo.number, info.fieldInfo.hasVectors(), info.fieldInfo.hasPayloads(),
           info.fieldInfo.hasPayloads(), info.fieldInfo.getIndexOptions(), docValuesType, -1, info.fieldInfo.attributes(),
-          info.fieldInfo.getPointDataDimensionCount(), info.fieldInfo.getPointIndexDimensionCount(), info.fieldInfo.getPointNumBytes(),
+          info.fieldInfo.getPointDimensionCount(), info.fieldInfo.getPointIndexDimensionCount(), info.fieldInfo.getPointNumBytes(),
           info.fieldInfo.isSoftDeletesField()
       );
     } else if (existingDocValuesType != docValuesType) {
@@ -729,7 +728,7 @@ public class MemoryIndex {
       String fieldName = entry.getKey();
       Info info = entry.getValue();
       info.sortTerms();
-      result.append(fieldName + ":\n");
+      result.append(fieldName).append(":\n");
       SliceByteStartArray sliceArray = info.sliceArray;
       int numPositions = 0;
       SliceReader postingsReader = new SliceReader(intBlockPool);
@@ -737,7 +736,7 @@ public class MemoryIndex {
         int ord = info.sortedTerms[j];
         info.terms.get(ord, spare);
         int freq = sliceArray.freq[ord];
-        result.append("\t'" + spare + "':" + freq + ":");
+        result.append("\t'").append(spare).append("':").append(freq).append(':');
         postingsReader.reset(sliceArray.start[ord], sliceArray.end[ord]);
         result.append(" [");
         final int iters = storeOffsets ? 3 : 1;
@@ -753,7 +752,7 @@ public class MemoryIndex {
           if (storePayloads) {
             int payloadIndex = postingsReader.readInt();
             if (payloadIndex != -1) {
-                result.append(", " + payloadsBytesRefs.get(payloadBuilder, payloadIndex));
+                result.append(", ").append(payloadsBytesRefs.get(payloadBuilder, payloadIndex));
             }
           }
           result.append(")");
@@ -768,16 +767,16 @@ public class MemoryIndex {
         numPositions += freq;
       }
 
-      result.append("\tterms=" + info.terms.size());
-      result.append(", positions=" + numPositions);
+      result.append("\tterms=").append(info.terms.size());
+      result.append(", positions=").append(numPositions);
       result.append("\n");
       sumPositions += numPositions;
       sumTerms += info.terms.size();
     }
     
-    result.append("\nfields=" + fields.size());
-    result.append(", terms=" + sumTerms);
-    result.append(", positions=" + sumPositions);
+    result.append("\nfields=").append(fields.size());
+    result.append(", terms=").append(sumTerms);
+    result.append(", positions=").append(sumPositions);
     return result.toString();
   }
   
@@ -872,7 +871,7 @@ public class MemoryIndex {
         if (pointValues != null) {
           assert pointValues[0].bytes.length == pointValues[0].length : "BytesRef should wrap a precise byte[], BytesRef.deepCopyOf() should take care of this";
 
-          final int numDimensions = fieldInfo.getPointDataDimensionCount();
+          final int numDimensions = fieldInfo.getPointDimensionCount();
           final int numBytesPerDimension = fieldInfo.getPointNumBytes();
           if (numDimensions == 1) {
             // PointInSetQuery.MergePointVisitor expects values to be visited in increasing order,
@@ -889,10 +888,10 @@ public class MemoryIndex {
               assert pointValue.bytes.length == pointValue.length : "BytesRef should wrap a precise byte[], BytesRef.deepCopyOf() should take care of this";
               for (int dim = 0; dim < numDimensions; ++dim) {
                 int offset = dim * numBytesPerDimension;
-                if (FutureArrays.compareUnsigned(pointValue.bytes, offset, offset + numBytesPerDimension, minPackedValue, offset, offset + numBytesPerDimension) < 0) {
+                if (Arrays.compareUnsigned(pointValue.bytes, offset, offset + numBytesPerDimension, minPackedValue, offset, offset + numBytesPerDimension) < 0) {
                   System.arraycopy(pointValue.bytes, offset, minPackedValue, offset, numBytesPerDimension);
                 }
-                if (FutureArrays.compareUnsigned(pointValue.bytes, offset, offset + numBytesPerDimension, maxPackedValue, offset, offset + numBytesPerDimension) > 0) {
+                if (Arrays.compareUnsigned(pointValue.bytes, offset, offset + numBytesPerDimension, maxPackedValue, offset, offset + numBytesPerDimension) > 0) {
                   System.arraycopy(pointValue.bytes, offset, maxPackedValue, offset, numBytesPerDimension);
                 }
               }
@@ -1333,7 +1332,7 @@ public class MemoryIndex {
       }
     }
 
-    private class MemoryTermsEnum extends TermsEnum {
+    private class MemoryTermsEnum extends BaseTermsEnum {
       private final Info info;
       private final BytesRef br = new BytesRef();
       int termUpto = -1;
@@ -1581,13 +1580,13 @@ public class MemoryIndex {
       }
 
       @Override
-      public int getNumDataDimensions() throws IOException {
-        return info.fieldInfo.getPointDataDimensionCount();
+      public int getNumDimensions() throws IOException {
+        return info.fieldInfo.getPointDimensionCount();
       }
 
       @Override
       public int getNumIndexDimensions() throws IOException {
-        return info.fieldInfo.getPointDataDimensionCount();
+        return info.fieldInfo.getPointDimensionCount();
       }
 
       @Override

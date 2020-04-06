@@ -18,8 +18,8 @@ package org.apache.solr.update;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
-import java.net.ConnectException;
 import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -48,9 +48,8 @@ import org.apache.solr.handler.component.HttpShardHandlerFactory;
 import org.apache.solr.handler.component.ShardHandler;
 import org.apache.solr.handler.component.ShardRequest;
 import org.apache.solr.handler.component.ShardResponse;
-import org.apache.solr.logging.MDCLoggingContext;
-import org.apache.solr.metrics.SolrMetricManager;
 import org.apache.solr.metrics.SolrMetricProducer;
+import org.apache.solr.metrics.SolrMetricsContext;
 import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.response.SolrQueryResponse;
@@ -96,6 +95,7 @@ public class PeerSync implements SolrMetricProducer {
   private Timer syncTime;
   private Counter syncErrors;
   private Counter syncSkipped;
+  private SolrMetricsContext solrMetricsContext;
 
   // comparator that sorts by absolute value, putting highest first
   public static Comparator<Long> absComparator = (l1, l2) -> Long.compare(Math.abs(l2), Math.abs(l1));
@@ -133,10 +133,16 @@ public class PeerSync implements SolrMetricProducer {
   public static final String METRIC_SCOPE = "peerSync";
 
   @Override
-  public void initializeMetrics(SolrMetricManager manager, String registry, String tag, String scope) {
-    syncTime = manager.timer(null, registry, "time", scope, METRIC_SCOPE);
-    syncErrors = manager.counter(null, registry, "errors", scope, METRIC_SCOPE);
-    syncSkipped = manager.counter(null, registry, "skipped", scope, METRIC_SCOPE);
+  public SolrMetricsContext getSolrMetricsContext() {
+    return solrMetricsContext;
+  }
+
+  @Override
+  public void initializeMetrics(SolrMetricsContext parentContext, String scope) {
+    this.solrMetricsContext = parentContext.getChildContext(this);
+    syncTime = solrMetricsContext.timer("time", scope, METRIC_SCOPE);
+    syncErrors = solrMetricsContext.counter("errors", scope, METRIC_SCOPE);
+    syncSkipped = solrMetricsContext.counter("skipped", scope, METRIC_SCOPE);
   }
 
   public static long percentile(List<Long> arr, float frac) {
@@ -166,7 +172,6 @@ public class PeerSync implements SolrMetricProducer {
       syncErrors.inc();
       return PeerSyncResult.failure();
     }
-    MDCLoggingContext.setCore(core);
     Timer.Context timerContext = null;
     try {
       log.info(msg() + "START replicas=" + replicas + " nUpdates=" + nUpdates);
@@ -250,7 +255,6 @@ public class PeerSync implements SolrMetricProducer {
       if (timerContext != null) {
         timerContext.close();
       }
-      MDCLoggingContext.clear();
     }
   }
 
@@ -339,7 +343,7 @@ public class PeerSync implements SolrMetricProducer {
         Throwable solrException = ((SolrServerException) srsp.getException())
             .getRootCause();
         boolean connectTimeoutExceptionInChain = connectTimeoutExceptionInChain(srsp.getException());
-        if (connectTimeoutExceptionInChain || solrException instanceof ConnectException || solrException instanceof ConnectTimeoutException
+        if (connectTimeoutExceptionInChain || solrException instanceof ConnectTimeoutException || solrException instanceof SocketTimeoutException
             || solrException instanceof NoHttpResponseException || solrException instanceof SocketException) {
           log.warn(msg() + " couldn't connect to " + srsp.getShardAddress() + ", counting as success", srsp.getException());
 
@@ -746,7 +750,7 @@ public class PeerSync implements SolrMetricProducer {
           ourUpdatesIndex--;
         } else {
           long rangeStart = otherVersions.get(otherUpdatesIndex);
-          while ((otherUpdatesIndex < otherVersions.size())
+          while (otherUpdatesIndex >= 0
               && (Math.abs(otherVersions.get(otherUpdatesIndex)) < Math.abs(ourUpdates.get(ourUpdatesIndex)))) {
             otherUpdatesIndex--;
             totalRequestedVersions++;

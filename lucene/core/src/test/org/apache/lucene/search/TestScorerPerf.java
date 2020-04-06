@@ -142,7 +142,12 @@ public class TestScorerPerf extends LuceneTestCase {
         }
       };
     }
-    
+
+    @Override
+    public void visit(QueryVisitor visitor) {
+
+    }
+
     @Override
     public String toString(String field) {
       return "randomBitSetFilter";
@@ -347,8 +352,9 @@ public class TestScorerPerf extends LuceneTestCase {
 
         FixedBitSet[] sets = randBitSets(atLeast(1000), atLeast(10));
 
-        doConjunctions(s, sets, atLeast(10000), atLeast(5));
-        doNestedConjunctions(s, sets, atLeast(10000), atLeast(3), atLeast(3));
+        int iterations = TEST_NIGHTLY ? atLeast(10000) : atLeast(500);
+        doConjunctions(s, sets, iterations, atLeast(5));
+        doNestedConjunctions(s, sets, iterations, atLeast(3), atLeast(3));
       }
     }
   }

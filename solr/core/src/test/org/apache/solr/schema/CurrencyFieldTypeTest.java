@@ -220,10 +220,15 @@ public class CurrencyFieldTypeTest extends SolrTestCaseJ4 {
     assertQ(req("fl", "*,score", "q",
             fieldName+":[24.99,EUR TO 25.01,EUR]"),
             "//*[@numFound='1']");
-    
+
     // Open ended ranges without currency
     assertQ(req("fl", "*,score", "q",
             fieldName+":[* TO *]"),
+            "//*[@numFound='" + (2 + 10 + negDocs) + "']");
+
+    // Open ended ranges without currency
+    assertQ(req("fl", "*,score", "q",
+            fieldName+":*"),
             "//*[@numFound='" + (2 + 10 + negDocs) + "']");
     
     // Open ended ranges with currency
@@ -468,13 +473,7 @@ public class CurrencyFieldTypeTest extends SolrTestCaseJ4 {
     assertEquals("3.14,GBP", new CurrencyValue(314, "GBP").strValue());
 
     CurrencyValue currencyValue = new CurrencyValue(314, "XYZ");
-    try {
-      String string = currencyValue.strValue();
-      fail("Expected SolrException");
-    } catch (SolrException exception) {
-    } catch (Throwable throwable) {
-      fail("Expected SolrException");
-    }
+    expectThrows(SolrException.class,  currencyValue::strValue);
   }
 
   @Test

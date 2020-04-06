@@ -31,13 +31,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.solr.cloud.ZkController;
 import org.apache.solr.common.NonExistentCoreException;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.util.Pair;
 import org.apache.solr.core.CoreContainer;
-import org.apache.solr.core.SolrCore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -53,7 +51,7 @@ import org.slf4j.LoggerFactory;
  * @lucene.internal
  */
 public class TestInjection {
-  
+
   public static class TestShutdownFailError extends OutOfMemoryError {
 
     public TestShutdownFailError(String msg) {
@@ -105,7 +103,7 @@ public class TestInjection {
   }
   
   public volatile static String nonGracefullClose = null;
-
+  
   public volatile static String failReplicaRequests = null;
   
   public volatile static String failUpdateRequests = null;
@@ -128,7 +126,11 @@ public class TestInjection {
 
   public volatile static CountDownLatch splitLatch = null;
 
-  public volatile static String waitForReplicasInSync = "true:60";
+  public volatile static CountDownLatch directUpdateLatch = null;
+
+  public volatile static CountDownLatch reindexLatch = null;
+
+  public volatile static String reindexFailure = null;
 
   public volatile static String failIndexFingerprintRequests = null;
 
@@ -139,6 +141,19 @@ public class TestInjection {
   private volatile static AtomicInteger countPrepRecoveryOpPauseForever = new AtomicInteger(0);
 
   public volatile static Integer delayBeforeSlaveCommitRefresh=null;
+
+  public volatile static Integer delayInExecutePlanAction=null;
+
+  public volatile static boolean failInExecutePlanAction = false;
+
+  /**
+   * Defaults to <code>false</code>, If set to <code>true</code>, 
+   * then {@link #injectSkipIndexWriterCommitOnClose} will return <code>true</code>
+   *
+   * @see #injectSkipIndexWriterCommitOnClose
+   * @see org.apache.solr.update.DirectUpdateHandler2#closeWriter
+   */
+  public volatile static boolean skipIndexWriterCommitOnClose = false;
 
   public volatile static boolean uifOutOfMemoryError = false;
 
@@ -160,12 +175,17 @@ public class TestInjection {
     splitFailureBeforeReplicaCreation = null;
     splitFailureAfterReplicaCreation = null;
     splitLatch = null;
+    directUpdateLatch = null;
+    reindexLatch = null;
+    reindexFailure = null;
     prepRecoveryOpPauseForever = null;
     countPrepRecoveryOpPauseForever = new AtomicInteger(0);
-    waitForReplicasInSync = "true:60";
     failIndexFingerprintRequests = null;
     wrongIndexFingerprint = null;
     delayBeforeSlaveCommitRefresh = null;
+    delayInExecutePlanAction = null;
+    failInExecutePlanAction = false;
+    skipIndexWriterCommitOnClose = false;
     uifOutOfMemoryError = false;
     notifyPauseForeverDone();
     newSearcherHooks.clear();
@@ -237,8 +257,9 @@ public class TestInjection {
         if (rand.nextBoolean()) {
           throw new TestShutdownFailError("Test exception for non graceful close");
         } else {
-          
+          final Timer timer = new Timer();
           final Thread cthread = Thread.currentThread();
+
           TimerTask task = new TimerTask() {
             @Override
             public void run() {
@@ -255,11 +276,10 @@ public class TestInjection {
               }
               
               cthread.interrupt();
-              timers.remove(this);
-              cancel();
+              timers.remove(timer);
             }
           };
-          Timer timer = new Timer();
+
           timers.add(timer);
           timer.schedule(task, rand.nextInt(500));
         }
@@ -268,6 +288,21 @@ public class TestInjection {
     return true;
   }
 
+  /**
+   * Returns the value of {@link #skipIndexWriterCommitOnClose}.
+   *
+   * @param indexWriter used only for logging
+   * @see #skipIndexWriterCommitOnClose
+   * @see org.apache.solr.update.DirectUpdateHandler2#closeWriter
+   */
+  public static boolean injectSkipIndexWriterCommitOnClose(Object indexWriter) {
+    if (skipIndexWriterCommitOnClose) {
+      log.info("Inject failure: skipIndexWriterCommitOnClose={}: {}",
+               skipIndexWriterCommitOnClose, indexWriter);
+    }
+    return skipIndexWriterCommitOnClose;
+  }
+  
   public static boolean injectFailReplicaRequests() {
     if (failReplicaRequests != null) {
       Random rand = random();
@@ -428,14 +463,47 @@ public class TestInjection {
     return true;
   }
 
-  public static boolean waitForInSyncWithLeader(SolrCore core, ZkController zkController, String collection, String shardId) {
-    // NOTE: this method should do *NOTHING* unless LUCENE_TEST_CASE is non-null
-    
-    if (waitForReplicasInSync == null) return true;
-    
-    return true; // No-Op: see SOLR-12313
+  public static boolean injectDirectUpdateLatch() {
+    if (directUpdateLatch != null) {
+      try {
+        log.info("Waiting in DirectUpdateHandler2 for up to 60s");
+        return directUpdateLatch.await(60, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    return true;
   }
-  
+
+  public static boolean injectReindexFailure() {
+    if (reindexFailure != null)  {
+      Random rand = random();
+      if (null == rand) return true;
+
+      Pair<Boolean,Integer> pair = parseValue(reindexFailure);
+      boolean enabled = pair.first();
+      int chanceIn100 = pair.second();
+      if (enabled && rand.nextInt(100) >= (100 - chanceIn100)) {
+        log.info("Test injection failure");
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Test injection failure");
+      }
+    }
+    return true;
+  }
+
+
+  public static boolean injectReindexLatch() {
+    if (reindexLatch != null) {
+      try {
+        log.info("Waiting in ReindexCollectionCmd for up to 60s");
+        return reindexLatch.await(60, TimeUnit.SECONDS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
+    }
+    return true;
+  }
+
   private static Pair<Boolean,Integer> parseValue(final String raw) {
     if (raw == null) return new Pair<>(false, 0);
     Matcher m = ENABLED_PERCENT.matcher(raw);

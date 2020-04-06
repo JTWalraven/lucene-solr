@@ -36,9 +36,7 @@ import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.BytesRefBuilder;
 import org.apache.lucene.util.FixedBitSet;
-import org.apache.lucene.util.FutureArrays;
 import org.apache.lucene.util.IOUtils;
-import org.apache.lucene.util.MSBRadixSorter;
 import org.apache.lucene.util.NumericUtils;
 import org.apache.lucene.util.bkd.BKDRadixSelector;
 import org.apache.lucene.util.bkd.BKDWriter;
@@ -46,6 +44,7 @@ import org.apache.lucene.util.bkd.HeapPointWriter;
 import org.apache.lucene.util.bkd.MutablePointsReaderUtils;
 import org.apache.lucene.util.bkd.OfflinePointWriter;
 import org.apache.lucene.util.bkd.PointReader;
+import org.apache.lucene.util.bkd.PointValue;
 import org.apache.lucene.util.bkd.PointWriter;
 
 import static org.apache.lucene.codecs.simpletext.SimpleTextPointsWriter.BLOCK_COUNT;
@@ -96,8 +95,11 @@ final class SimpleTextBKDWriter implements Closeable {
   /** Default maximum heap to use, before spilling to (slower) disk */
   public static final float DEFAULT_MAX_MB_SORT_IN_HEAP = 16.0f;
 
+  /** Maximum number of dimensions (2 * max index dimensions) */
+  public static final int MAX_DIMS = 16;
+
   /** Maximum number of dimensions */
-  public static final int MAX_DIMS = 8;
+  public static final int MAX_INDEX_DIMS = 8;
 
   /** How many dimensions we are storing at the leaf (data) nodes */
   protected final int numDataDims;
@@ -108,7 +110,7 @@ final class SimpleTextBKDWriter implements Closeable {
   /** How many bytes each value in each dimension takes. */
   protected final int bytesPerDim;
 
-  /** numDataDims * bytesPerDim */
+  /** numDims * bytesPerDim */
   protected final int packedBytesLength;
 
   /** numIndexDims * bytesPerDim */
@@ -129,8 +131,8 @@ final class SimpleTextBKDWriter implements Closeable {
 
   protected final FixedBitSet docsSeen;
 
-  private OfflinePointWriter offlinePointWriter;
-  private HeapPointWriter heapPointWriter;
+  private PointWriter pointWriter;
+  private boolean finished;
 
   private IndexOutput tempInput;
   protected final int maxPointsInLeafNode;
@@ -146,7 +148,6 @@ final class SimpleTextBKDWriter implements Closeable {
 
   /** An upper bound on how many points the caller will add (includes deletions) */
   private final long totalPointCount;
-
 
   private final int maxDoc;
 
@@ -179,36 +180,28 @@ final class SimpleTextBKDWriter implements Closeable {
     // dimensional values (numDims * bytesPerDim) +  docID (int)
     bytesPerDoc = packedBytesLength + Integer.BYTES;
 
-    // As we recurse, we compute temporary partitions of the data, halving the
-    // number of points at each recursion.  Once there are few enough points,
-    // we can switch to sorting in heap instead of offline (on disk).  At any
-    // time in the recursion, we hold the number of points at that level, plus
-    // all recursive halves (i.e. 16 + 8 + 4 + 2) so the memory usage is 2X
-    // what that level would consume, so we multiply by 0.5 to convert from
-    // bytes to points here.  In addition the radix partitioning may sort on memory
-    // double of this size so we multiply by another 0.5.
-
-    maxPointsSortInHeap = (int) (0.25 * (maxMBSortInHeap * 1024 * 1024) / (bytesPerDoc * numDataDims));
+    // Maximum number of points we hold in memory at any time
+    maxPointsSortInHeap = (int) ((maxMBSortInHeap * 1024 * 1024) / (bytesPerDoc * numDataDims));
 
     // Finally, we must be able to hold at least the leaf node in heap during build:
     if (maxPointsSortInHeap < maxPointsInLeafNode) {
       throw new IllegalArgumentException("maxMBSortInHeap=" + maxMBSortInHeap + " only allows for maxPointsSortInHeap=" + maxPointsSortInHeap + ", but this is less than maxPointsInLeafNode=" + maxPointsInLeafNode + "; either increase maxMBSortInHeap or decrease maxPointsInLeafNode");
     }
 
-    // We write first maxPointsSortInHeap in heap, then cutover to offline for additional points:
-    heapPointWriter = new HeapPointWriter(16, maxPointsSortInHeap, packedBytesLength);
-
     this.maxMBSortInHeap = maxMBSortInHeap;
   }
 
-  public static void verifyParams(int numDataDims, int numIndexDims, int maxPointsInLeafNode, double maxMBSortInHeap, long totalPointCount) {
+  public static void verifyParams(int numDims, int numIndexDims, int maxPointsInLeafNode, double maxMBSortInHeap, long totalPointCount) {
     // We encode dim in a single byte in the splitPackedValues, but we only expose 4 bits for it now, in case we want to use
     // remaining 4 bits for another purpose later
-    if (numDataDims < 1 || numDataDims > MAX_DIMS) {
-      throw new IllegalArgumentException("numDataDims must be 1 .. " + MAX_DIMS + " (got: " + numDataDims + ")");
+    if (numDims < 1 || numDims > MAX_DIMS) {
+      throw new IllegalArgumentException("numDims must be 1 .. " + MAX_DIMS + " (got: " + numDims + ")");
     }
-    if (numIndexDims < 1 || numIndexDims > numDataDims) {
-      throw new IllegalArgumentException("numIndexDims must be 1 .. " + numDataDims + " (got: " + numIndexDims + ")");
+    if (numIndexDims < 1 || numIndexDims > MAX_INDEX_DIMS) {
+      throw new IllegalArgumentException("numIndexDims must be 1 .. " + MAX_INDEX_DIMS + " (got: " + numIndexDims + ")");
+    }
+    if (numIndexDims > numDims) {
+      throw new IllegalArgumentException("numIndexDims cannot exceed numDims (" + numDims + ") (got: " + numIndexDims + ")");
     }
     if (maxPointsInLeafNode <= 0) {
       throw new IllegalArgumentException("maxPointsInLeafNode must be > 0; got " + maxPointsInLeafNode);
@@ -224,58 +217,37 @@ final class SimpleTextBKDWriter implements Closeable {
     }
   }
 
-  /** If the current segment has too many points then we spill over to temp files / offline sort. */
-  private void spillToOffline() throws IOException {
-
-    // For each .add we just append to this input file, then in .finish we sort this input and resursively build the tree:
-    offlinePointWriter = new OfflinePointWriter(tempDir, tempFileNamePrefix, packedBytesLength, "spill", 0);
-    tempInput = offlinePointWriter.out;
-    PointReader reader = heapPointWriter.getReader(0, pointCount);
-    for(int i=0;i<pointCount;i++) {
-      boolean hasNext = reader.next();
-      assert hasNext;
-      reader.packedValue(scratchBytesRef1);
-      offlinePointWriter.append(scratchBytesRef1, heapPointWriter.docIDs[i]);
-    }
-
-    heapPointWriter = null;
-  }
-
   public void add(byte[] packedValue, int docID) throws IOException {
     if (packedValue.length != packedBytesLength) {
       throw new IllegalArgumentException("packedValue should be length=" + packedBytesLength + " (got: " + packedValue.length + ")");
     }
-
-    if (pointCount >= maxPointsSortInHeap) {
-      if (offlinePointWriter == null) {
-        spillToOffline();
-      }
-      offlinePointWriter.append(packedValue, docID);
-    } else {
-      // Not too many points added yet, continue using heap:
-      heapPointWriter.append(packedValue, docID);
+    if (pointCount >= totalPointCount) {
+      throw new IllegalStateException("totalPointCount=" + totalPointCount + " was passed when we were created, but we just hit " + (pointCount + 1) + " values");
     }
-
-    // TODO: we could specialize for the 1D case:
     if (pointCount == 0) {
+      assert pointWriter == null : "Point writer is already initialized";
+      //total point count is an estimation but the final point count must be equal or lower to that number.
+      if (totalPointCount > maxPointsSortInHeap) {
+        pointWriter = new OfflinePointWriter(tempDir, tempFileNamePrefix, packedBytesLength, "spill", 0);
+        tempInput = ((OfflinePointWriter)pointWriter).out;
+      } else {
+        pointWriter = new HeapPointWriter(Math.toIntExact(totalPointCount), packedBytesLength);
+      }
       System.arraycopy(packedValue, 0, minPackedValue, 0, packedIndexBytesLength);
       System.arraycopy(packedValue, 0, maxPackedValue, 0, packedIndexBytesLength);
     } else {
       for(int dim=0;dim<numIndexDims;dim++) {
         int offset = dim*bytesPerDim;
-        if (FutureArrays.compareUnsigned(packedValue, offset, offset + bytesPerDim, minPackedValue, offset, offset + bytesPerDim) < 0) {
+        if (Arrays.compareUnsigned(packedValue, offset, offset + bytesPerDim, minPackedValue, offset, offset + bytesPerDim) < 0) {
           System.arraycopy(packedValue, offset, minPackedValue, offset, bytesPerDim);
         }
-        if (FutureArrays.compareUnsigned(packedValue, offset, offset + bytesPerDim, maxPackedValue, offset, offset + bytesPerDim) > 0) {
+        if (Arrays.compareUnsigned(packedValue, offset, offset + bytesPerDim, maxPackedValue, offset, offset + bytesPerDim) > 0) {
           System.arraycopy(packedValue, offset, maxPackedValue, offset, bytesPerDim);
         }
       }
     }
-
+    pointWriter.append(packedValue, docID);
     pointCount++;
-    if (pointCount > totalPointCount) {
-      throw new IllegalStateException("totalPointCount=" + totalPointCount + " was passed when we were created, but we just hit " + pointCount + " values");
-    }
     docsSeen.set(docID);
   }
 
@@ -306,12 +278,12 @@ final class SimpleTextBKDWriter implements Closeable {
     }
 
     // Catch user silliness:
-    if (heapPointWriter == null && tempInput == null) {
+    if (finished == true) {
       throw new IllegalStateException("already finished");
     }
 
     // Mark that we already finished:
-    heapPointWriter = null;
+    finished = true;
 
     long countPerLeaf = pointCount = values.size();
     long innerNodeCount = 1;
@@ -335,10 +307,10 @@ final class SimpleTextBKDWriter implements Closeable {
       values.getValue(i, scratchBytesRef1);
       for(int dim=0;dim<numIndexDims;dim++) {
         int offset = dim*bytesPerDim;
-        if (FutureArrays.compareUnsigned(scratchBytesRef1.bytes, scratchBytesRef1.offset + offset, scratchBytesRef1.offset + offset + bytesPerDim, minPackedValue, offset, offset + bytesPerDim) < 0) {
+        if (Arrays.compareUnsigned(scratchBytesRef1.bytes, scratchBytesRef1.offset + offset, scratchBytesRef1.offset + offset + bytesPerDim, minPackedValue, offset, offset + bytesPerDim) < 0) {
           System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + offset, minPackedValue, offset, bytesPerDim);
         }
-        if (FutureArrays.compareUnsigned(scratchBytesRef1.bytes, scratchBytesRef1.offset + offset, scratchBytesRef1.offset + offset + bytesPerDim, maxPackedValue, offset, offset + bytesPerDim) > 0) {
+        if (Arrays.compareUnsigned(scratchBytesRef1.bytes, scratchBytesRef1.offset + offset, scratchBytesRef1.offset + offset + bytesPerDim, maxPackedValue, offset, offset + bytesPerDim) > 0) {
           System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + offset, maxPackedValue, offset, bytesPerDim);
         }
       }
@@ -403,12 +375,12 @@ final class SimpleTextBKDWriter implements Closeable {
       }
 
       // Catch user silliness:
-      if (heapPointWriter == null && tempInput == null) {
+      if (finished == true) {
         throw new IllegalStateException("already finished");
       }
 
       // Mark that we already finished:
-      heapPointWriter = null;
+      finished = true;
 
       this.out = out;
 
@@ -573,41 +545,6 @@ final class SimpleTextBKDWriter implements Closeable {
     }
   }
 
-  // TODO: if we fixed each partition step to just record the file offset at the "split point", we could probably handle variable length
-  // encoding and not have our own ByteSequencesReader/Writer
-
-  /** Sort the heap writer by the specified dim */
-  private void sortHeapPointWriter(final HeapPointWriter writer, int dim) {
-    final int pointCount = Math.toIntExact(writer.count());
-    // Tie-break by docID:
-
-    // No need to tie break on ord, for the case where the same doc has the same value in a given dimension indexed more than once: it
-    // can't matter at search time since we don't write ords into the index:
-    new MSBRadixSorter(bytesPerDim + Integer.BYTES) {
-
-      @Override
-      protected int byteAt(int i, int k) {
-        assert k >= 0;
-        if (k < bytesPerDim) {
-          // dim bytes
-          int block = i / writer.valuesPerBlock;
-          int index = i % writer.valuesPerBlock;
-          return writer.blocks.get(block)[index * packedBytesLength + dim * bytesPerDim + k] & 0xff;
-        } else {
-          // doc id
-          int s = 3 - (k - bytesPerDim);
-          return (writer.docIDs[i] >>> (s * 8)) & 0xff;
-        }
-      }
-
-      @Override
-      protected void swap(int i, int j) {
-        writer.swap(i, j);
-      }
-
-    }.sort(0, pointCount);
-  }
-
   private void checkMaxLeafNodeCount(int numLeaves) {
     if ((1+bytesPerDim) * (long) numLeaves > ArrayUtil.MAX_ARRAY_LENGTH) {
       throw new IllegalStateException("too many nodes; increase maxPointsInLeafNode (currently " + maxPointsInLeafNode + ") and reindex");
@@ -621,24 +558,24 @@ final class SimpleTextBKDWriter implements Closeable {
     // TODO: specialize the 1D case?  it's much faster at indexing time (no partitioning on recurse...)
 
     // Catch user silliness:
-    if (heapPointWriter == null && tempInput == null) {
-      throw new IllegalStateException("already finished");
-    }
-
-    PointWriter data;
-
-    if (offlinePointWriter != null) {
-      offlinePointWriter.close();
-      data = offlinePointWriter;
-      tempInput = null;
-    } else {
-      data = heapPointWriter;
-      heapPointWriter = null;
-    }
-
     if (pointCount == 0) {
       throw new IllegalStateException("must index at least one point");
     }
+
+    // Catch user silliness:
+    if (finished == true) {
+      throw new IllegalStateException("already finished");
+    }
+
+    //mark as finished
+    finished = true;
+
+    pointWriter.close();
+    BKDRadixSelector.PathSlice points = new BKDRadixSelector.PathSlice(pointWriter, 0, pointCount);
+    //clean up pointers
+    tempInput = null;
+    pointWriter = null;
+
 
     long countPerLeaf = pointCount;
     long innerNodeCount = 1;
@@ -665,15 +602,15 @@ final class SimpleTextBKDWriter implements Closeable {
     assert pointCount / numLeaves <= maxPointsInLeafNode: "pointCount=" + pointCount + " numLeaves=" + numLeaves + " maxPointsInLeafNode=" + maxPointsInLeafNode;
 
     //We re-use the selector so we do not need to create an object every time.
-    BKDRadixSelector radixSelector = new BKDRadixSelector(numDataDims, bytesPerDim, maxPointsSortInHeap, tempDir, tempFileNamePrefix);
+    BKDRadixSelector radixSelector = new BKDRadixSelector(numDataDims, numIndexDims, bytesPerDim, maxPointsSortInHeap, tempDir, tempFileNamePrefix);
 
     boolean success = false;
     try {
 
 
-      build(1, numLeaves, data, out,
+      build(1, numLeaves, points, out,
           radixSelector, minPackedValue, maxPackedValue,
-            splitPackedValues, leafBlockFPs);
+            splitPackedValues, leafBlockFPs, new int[maxPointsInLeafNode]);
 
 
       // If no exception, we should have cleaned everything up:
@@ -845,10 +782,10 @@ final class SimpleTextBKDWriter implements Closeable {
   private boolean valueInBounds(BytesRef packedValue, byte[] minPackedValue, byte[] maxPackedValue) {
     for(int dim=0;dim<numIndexDims;dim++) {
       int offset = bytesPerDim*dim;
-      if (FutureArrays.compareUnsigned(packedValue.bytes, packedValue.offset + offset, packedValue.offset + offset + bytesPerDim, minPackedValue, offset, offset + bytesPerDim) < 0) {
+      if (Arrays.compareUnsigned(packedValue.bytes, packedValue.offset + offset, packedValue.offset + offset + bytesPerDim, minPackedValue, offset, offset + bytesPerDim) < 0) {
         return false;
       }
-      if (FutureArrays.compareUnsigned(packedValue.bytes, packedValue.offset + offset, packedValue.offset + offset + bytesPerDim, maxPackedValue, offset, offset + bytesPerDim) > 0) {
+      if (Arrays.compareUnsigned(packedValue.bytes, packedValue.offset + offset, packedValue.offset + offset + bytesPerDim, maxPackedValue, offset, offset + bytesPerDim) > 0) {
         return false;
       }
     }
@@ -861,7 +798,7 @@ final class SimpleTextBKDWriter implements Closeable {
     int splitDim = -1;
     for(int dim=0;dim<numIndexDims;dim++) {
       NumericUtils.subtract(bytesPerDim, dim, maxPackedValue, minPackedValue, scratchDiff);
-      if (splitDim == -1 || FutureArrays.compareUnsigned(scratchDiff, 0, bytesPerDim, scratch1, 0, bytesPerDim) > 0) {
+      if (splitDim == -1 || Arrays.compareUnsigned(scratchDiff, 0, bytesPerDim, scratch1, 0, bytesPerDim) > 0) {
         System.arraycopy(scratchDiff, 0, scratch1, 0, bytesPerDim);
         splitDim = dim;
       }
@@ -874,15 +811,12 @@ final class SimpleTextBKDWriter implements Closeable {
   /** Pull a partition back into heap once the point count is low enough while recursing. */
   private HeapPointWriter switchToHeap(PointWriter source) throws IOException {
     int count = Math.toIntExact(source.count());
-    // Not inside the try because we don't want to close it here:
-
     try (PointReader reader = source.getReader(0, count);
-        HeapPointWriter writer = new HeapPointWriter(count, count, packedBytesLength)) {
+        HeapPointWriter writer = new HeapPointWriter(count, packedBytesLength)) {
       for(int i=0;i<count;i++) {
         boolean hasNext = reader.next();
         assert hasNext;
-        reader.packedValue(scratchBytesRef1);
-        writer.append(scratchBytesRef1, reader.docID());
+        writer.append(reader.pointValue());
       }
       return writer;
     } catch (Throwable t) {
@@ -948,7 +882,7 @@ final class SimpleTextBKDWriter implements Closeable {
       }
 
       // sort by sortedDim
-      MutablePointsReaderUtils.sortByDim(sortedDim, bytesPerDim, commonPrefixLengths,
+      MutablePointsReaderUtils.sortByDim(numDataDims, numIndexDims, sortedDim, bytesPerDim, commonPrefixLengths,
                                          reader, from, to, scratchBytesRef1, scratchBytesRef2);
 
       // Save the block file pointer:
@@ -991,7 +925,7 @@ final class SimpleTextBKDWriter implements Closeable {
           break;
         }
       }
-      MutablePointsReaderUtils.partition(maxDoc, splitDim, bytesPerDim, commonPrefixLen,
+      MutablePointsReaderUtils.partition(numDataDims, numIndexDims, maxDoc, splitDim, bytesPerDim, commonPrefixLen,
           reader, from, to, mid, scratchBytesRef1, scratchBytesRef2);
 
       // set the split value
@@ -1017,27 +951,29 @@ final class SimpleTextBKDWriter implements Closeable {
 
   /** The array (sized numDims) of PathSlice describe the cell we have currently recursed to. */
   private void build(int nodeID, int leafNodeOffset,
-                     PointWriter data,
+                     BKDRadixSelector.PathSlice points,
                      IndexOutput out,
                      BKDRadixSelector radixSelector,
                      byte[] minPackedValue, byte[] maxPackedValue,
                      byte[] splitPackedValues,
-                     long[] leafBlockFPs) throws IOException {
+                     long[] leafBlockFPs,
+                     int[] spareDocIds) throws IOException {
 
     if (nodeID >= leafNodeOffset) {
 
       // Leaf node: write block
       // We can write the block in any order so by default we write it sorted by the dimension that has the
       // least number of unique bytes at commonPrefixLengths[dim], which makes compression more efficient
-
-      if (data instanceof HeapPointWriter == false) {
-        // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
-        // offline, but then kept splitting only in one dimension, and so never had to rewrite into heap writer
-        data = switchToHeap(data);
+      HeapPointWriter heapSource;
+      if (points.writer instanceof HeapPointWriter == false) {
+        // Adversarial cases can cause this, e.g. merging big segments with most of the points deleted
+        heapSource  = switchToHeap(points.writer);
+      } else {
+        heapSource = (HeapPointWriter) points.writer;
       }
 
-      // We ensured that maxPointsSortInHeap was >= maxPointsInLeafNode, so we better be in heap at this point:
-      HeapPointWriter heapSource = (HeapPointWriter) data;
+      int from = Math.toIntExact(points.start);
+      int to = Math.toIntExact(points.start + points.count);
 
       //we store common prefix on scratch1
       computeCommonPrefixLength(heapSource, scratch1);
@@ -1056,8 +992,9 @@ final class SimpleTextBKDWriter implements Closeable {
         if (prefix < bytesPerDim) {
           int offset = dim * bytesPerDim;
           for (int i = 0; i < heapSource.count(); ++i) {
-            heapSource.getPackedValueSlice(i, scratchBytesRef1);
-            int bucket = scratchBytesRef1.bytes[scratchBytesRef1.offset + offset + prefix] & 0xff;
+            PointValue value = heapSource.getPackedValueSlice(i);
+            BytesRef packedValue = value.packedValue();
+            int bucket = packedValue.bytes[packedValue.offset + offset + prefix] & 0xff;
             usedBytes[dim].set(bucket);
           }
           int cardinality = usedBytes[dim].cardinality();
@@ -1068,7 +1005,8 @@ final class SimpleTextBKDWriter implements Closeable {
         }
       }
 
-      sortHeapPointWriter(heapSource, sortedDim);
+      // sort the chosen dimension
+      radixSelector.heapRadixSort(heapSource, from, to, sortedDim, commonPrefixLengths[sortedDim]);
 
       // Save the block file pointer:
       leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
@@ -1076,9 +1014,14 @@ final class SimpleTextBKDWriter implements Closeable {
 
       // Write docIDs first, as their own chunk, so that at intersect time we can add all docIDs w/o
       // loading the values:
-      int count = Math.toIntExact(heapSource.count());
+      int count = to - from;
       assert count > 0: "nodeID=" + nodeID + " leafNodeOffset=" + leafNodeOffset;
-      writeLeafBlockDocs(out, heapSource.docIDs, 0, count);
+      // Write doc IDs
+      int[] docIDs = spareDocIds;
+      for (int i = 0; i < count; i++) {
+        docIDs[i] = heapSource.getPackedValueSlice(from + i).docID();
+      }
+      writeLeafBlockDocs(out, spareDocIds, 0, count);
 
       // TODO: minor opto: we don't really have to write the actual common prefixes, because BKDReader on recursing can regenerate it for us
       // from the index, much like how terms dict does so from the FST:
@@ -1093,12 +1036,12 @@ final class SimpleTextBKDWriter implements Closeable {
 
         @Override
         public BytesRef apply(int i) {
-          heapSource.getPackedValueSlice(i, scratch);
-          return scratch;
+          PointValue value = heapSource.getPackedValueSlice(from + i);
+          return value.packedValue();
         }
       };
       assert valuesInOrderAndBounds(count, sortedDim, minPackedValue, maxPackedValue, packedValues,
-          heapSource.docIDs, Math.toIntExact(0));
+          docIDs, 0);
       writeLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues);
 
     } else {
@@ -1111,25 +1054,22 @@ final class SimpleTextBKDWriter implements Closeable {
         splitDim = 0;
       }
 
-
       assert nodeID < splitPackedValues.length : "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
 
       // How many points will be in the left tree:
-      long rightCount = data.count() / 2;
-      long leftCount = data.count() - rightCount;
+      long rightCount = points.count / 2;
+      long leftCount = points.count - rightCount;
 
-      PointWriter leftPointWriter;
-      PointWriter rightPointWriter;
-      byte[] splitValue;
-
-      try (PointWriter leftPointWriter2 = getPointWriter(leftCount, "left" + splitDim);
-           PointWriter rightPointWriter2 = getPointWriter(rightCount, "right" + splitDim)) {
-        splitValue = radixSelector.select(data, leftPointWriter2, rightPointWriter2, 0, data.count(),  leftCount, splitDim);
-        leftPointWriter = leftPointWriter2;
-        rightPointWriter = rightPointWriter2;
-      } catch (Throwable t) {
-        throw verifyChecksum(t, data);
+      int commonPrefixLen = Arrays.mismatch(minPackedValue, splitDim * bytesPerDim,
+          splitDim * bytesPerDim + bytesPerDim, maxPackedValue, splitDim * bytesPerDim,
+          splitDim * bytesPerDim + bytesPerDim);
+      if (commonPrefixLen == -1) {
+        commonPrefixLen = bytesPerDim;
       }
+
+      BKDRadixSelector.PathSlice[] pathSlices = new BKDRadixSelector.PathSlice[2];
+
+      byte[] splitValue =  radixSelector.select(points, pathSlices, points.start, points.start + points.count,  points.start + leftCount, splitDim, commonPrefixLen);
 
       int address = nodeID * (1 + bytesPerDim);
       splitPackedValues[address] = (byte) splitDim;
@@ -1144,31 +1084,30 @@ final class SimpleTextBKDWriter implements Closeable {
       System.arraycopy(splitValue, 0, minSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
       System.arraycopy(splitValue, 0, maxSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
 
-
-
       // Recurse on left tree:
-      build(2*nodeID, leafNodeOffset, leftPointWriter, out, radixSelector,
-            minPackedValue, maxSplitPackedValue, splitPackedValues, leafBlockFPs);
+      build(2*nodeID, leafNodeOffset, pathSlices[0], out, radixSelector,
+            minPackedValue, maxSplitPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
 
       // TODO: we could "tail recurse" here?  have our parent discard its refs as we recurse right?
       // Recurse on right tree:
-      build(2*nodeID+1, leafNodeOffset, rightPointWriter, out, radixSelector,
-            minSplitPackedValue, maxPackedValue, splitPackedValues, leafBlockFPs);
+      build(2*nodeID+1, leafNodeOffset, pathSlices[1], out, radixSelector,
+            minSplitPackedValue, maxPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
     }
   }
 
   private void computeCommonPrefixLength(HeapPointWriter heapPointWriter, byte[] commonPrefix) {
     Arrays.fill(commonPrefixLengths, bytesPerDim);
-    scratchBytesRef1.length = packedBytesLength;
-    heapPointWriter.getPackedValueSlice(0, scratchBytesRef1);
+    PointValue value = heapPointWriter.getPackedValueSlice(0);
+    BytesRef packedValue = value.packedValue();
     for (int dim = 0; dim < numDataDims; dim++) {
-      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + dim * bytesPerDim, commonPrefix, dim * bytesPerDim, bytesPerDim);
+      System.arraycopy(packedValue.bytes, packedValue.offset + dim * bytesPerDim, commonPrefix, dim * bytesPerDim, bytesPerDim);
     }
     for (int i = 1; i < heapPointWriter.count(); i++) {
-      heapPointWriter.getPackedValueSlice(i, scratchBytesRef1);
+      value = heapPointWriter.getPackedValueSlice(i);
+      packedValue = value.packedValue();
       for (int dim = 0; dim < numDataDims; dim++) {
         if (commonPrefixLengths[dim] != 0) {
-          int j = FutureArrays.mismatch(commonPrefix, dim * bytesPerDim, dim * bytesPerDim + commonPrefixLengths[dim], scratchBytesRef1.bytes, scratchBytesRef1.offset + dim * bytesPerDim, scratchBytesRef1.offset + dim * bytesPerDim + commonPrefixLengths[dim]);
+          int j = Arrays.mismatch(commonPrefix, dim * bytesPerDim, dim * bytesPerDim + commonPrefixLengths[dim], packedValue.bytes, packedValue.offset + dim * bytesPerDim, packedValue.offset + dim * bytesPerDim + commonPrefixLengths[dim]);
           if (j != -1) {
             commonPrefixLengths[dim] = j;
           }
@@ -1200,9 +1139,16 @@ final class SimpleTextBKDWriter implements Closeable {
       int doc, int lastDoc) {
     int dimOffset = sortedDim * bytesPerDim;
     if (ord > 0) {
-      int cmp = FutureArrays.compareUnsigned(lastPackedValue, dimOffset, dimOffset + bytesPerDim, packedValue, packedValueOffset + dimOffset, packedValueOffset + dimOffset + bytesPerDim);
+      int cmp = Arrays.compareUnsigned(lastPackedValue, dimOffset, dimOffset + bytesPerDim, packedValue, packedValueOffset + dimOffset, packedValueOffset + dimOffset + bytesPerDim);
       if (cmp > 0) {
         throw new AssertionError("values out of order: last value=" + new BytesRef(lastPackedValue) + " current value=" + new BytesRef(packedValue, packedValueOffset, packedBytesLength) + " ord=" + ord + " sortedDim=" + sortedDim);
+      }
+      if (cmp == 0  && numDataDims > numIndexDims) {
+        int dataOffset = numIndexDims * bytesPerDim;
+        cmp = Arrays.compareUnsigned(lastPackedValue, dataOffset, packedBytesLength, packedValue, packedValueOffset + dataOffset, packedValueOffset + packedBytesLength);
+        if (cmp > 0) {
+          throw new AssertionError("data values out of order: last value=" + new BytesRef(lastPackedValue) + " current value=" + new BytesRef(packedValue, packedValueOffset, packedBytesLength) + " ord=" + ord);
+        }
       }
       if (cmp == 0 && doc < lastDoc) {
         throw new AssertionError("docs out of order: last doc=" + lastDoc + " current doc=" + doc + " ord=" + ord + " sortedDim=" + sortedDim);
@@ -1210,15 +1156,6 @@ final class SimpleTextBKDWriter implements Closeable {
     }
     System.arraycopy(packedValue, packedValueOffset, lastPackedValue, 0, packedBytesLength);
     return true;
-  }
-
-  PointWriter getPointWriter(long count, String desc) throws IOException {
-    if (count <= maxPointsSortInHeap) {
-      int size = Math.toIntExact(count);
-      return new HeapPointWriter(size, size, packedBytesLength);
-    } else {
-      return new OfflinePointWriter(tempDir, tempFileNamePrefix, packedBytesLength, desc, count);
-    }
   }
 
   private void write(IndexOutput out, String s) throws IOException {

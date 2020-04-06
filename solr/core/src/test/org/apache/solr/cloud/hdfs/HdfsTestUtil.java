@@ -17,14 +17,16 @@
 package org.apache.solr.cloud.hdfs;
 
 import java.io.File;
-import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.net.URI;
+import java.util.Arrays;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Timer;
 import java.util.TimerTask;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinWorkerThread;
 import java.util.regex.Pattern;
@@ -33,11 +35,23 @@ import org.apache.commons.lang3.time.FastDateFormat;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.HardLink;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.RawLocalFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.MiniDFSNNTopology;
+import org.apache.hadoop.hdfs.server.datanode.fsdataset.impl.BlockPoolSlice;
 import org.apache.hadoop.hdfs.server.namenode.NameNodeAdapter;
+import org.apache.hadoop.hdfs.server.namenode.NameNodeResourceChecker;
 import org.apache.hadoop.hdfs.server.namenode.ha.HATestUtil;
+import org.apache.hadoop.http.HttpServer2;
+import org.apache.hadoop.io.nativeio.NativeIO;
+import org.apache.hadoop.metrics2.MetricsSystem;
+import org.apache.hadoop.metrics2.impl.MetricsSystemImpl;
+import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
+import org.apache.hadoop.util.DiskChecker;
+import org.apache.lucene.util.Constants;
 import org.apache.lucene.util.LuceneTestCase;
 import org.apache.solr.SolrTestCaseJ4;
 import org.apache.solr.common.util.IOUtils;
@@ -47,14 +61,19 @@ import org.apache.solr.util.HdfsUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static org.apache.lucene.util.LuceneTestCase.random;
+
 public class HdfsTestUtil {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+
+  private static final String SOLR_HACK_FOR_CLASS_VERIFICATION_FIELD = "SOLR_HACK_FOR_CLASS_VERIFICATION";
 
   private static final String LOGICAL_HOSTNAME = "ha-nn-uri-%d";
 
   private static final boolean HA_TESTING_ENABLED = false; // SOLR-XXX
 
-  private static Map<MiniDFSCluster,Timer> timers = new ConcurrentHashMap<>();
+  private static Map<MiniDFSCluster,Timer> timers = new HashMap<>();
+  private static final Object TIMERS_LOCK = new Object();
 
   private static FSDataOutputStream badTlogOutStream;
 
@@ -66,6 +85,54 @@ public class HdfsTestUtil {
 
   public static MiniDFSCluster setupClass(String dir, boolean haTesting) throws Exception {
     return setupClass(dir, haTesting, true);
+  }
+
+  public static void checkAssumptions() {
+    ensureHadoopHomeNotSet();
+    checkHadoopWindows();
+    checkOverriddenHadoopClasses();
+    checkFastDateFormat();
+    checkGeneratedIdMatches();
+  }
+
+  /**
+   * If Hadoop home is set via environment variable HADOOP_HOME or Java system property
+   * hadoop.home.dir, the behavior of test is undefined. Ensure that these are not set
+   * before starting. It is not possible to easily unset environment variables so better
+   * to bail out early instead of trying to test.
+   */
+  private static void ensureHadoopHomeNotSet() {
+    if (System.getenv("HADOOP_HOME") != null) {
+      LuceneTestCase.fail("Ensure that HADOOP_HOME environment variable is not set.");
+    }
+    if (System.getProperty("hadoop.home.dir") != null) {
+      LuceneTestCase.fail("Ensure that \"hadoop.home.dir\" Java property is not set.");
+    }
+  }
+
+  /**
+   * Hadoop integration tests fail on Windows without Hadoop NativeIO
+   */
+  private static void checkHadoopWindows() {
+    LuceneTestCase.assumeTrue("Hadoop does not work on Windows without Hadoop NativeIO",
+        !Constants.WINDOWS || NativeIO.isAvailable());
+  }
+
+  /**
+   * Ensure that the tests are picking up the modified Hadoop classes
+   */
+  private static void checkOverriddenHadoopClasses() {
+    List<Class<?>> modifiedHadoopClasses = Arrays.asList(BlockPoolSlice.class, DiskChecker.class,
+        FileUtil.class, HardLink.class, HttpServer2.class, NameNodeResourceChecker.class, RawLocalFileSystem.class);
+    for (Class<?> clazz : modifiedHadoopClasses) {
+      try {
+        LuceneTestCase.assertNotNull("Field on " + clazz.getCanonicalName() + " should not have been null",
+            clazz.getField(SOLR_HACK_FOR_CLASS_VERIFICATION_FIELD));
+      } catch (NoSuchFieldException e) {
+        LuceneTestCase.fail("Expected to load Solr modified Hadoop class " + clazz.getCanonicalName() +
+            " , but it was not found.");
+      }
+    }
   }
 
   /**
@@ -91,58 +158,63 @@ public class HdfsTestUtil {
   }
 
   public static MiniDFSCluster setupClass(String dir, boolean safeModeTesting, boolean haTesting) throws Exception {
-    LuceneTestCase.assumeFalse("HDFS tests were disabled by -Dtests.disableHdfs",
-      Boolean.parseBoolean(System.getProperty("tests.disableHdfs", "false")));
-
-    checkFastDateFormat();
-    checkGeneratedIdMatches();
+    checkAssumptions();
 
     if (!HA_TESTING_ENABLED) haTesting = false;
 
-    int dataNodes = Integer.getInteger("tests.hdfs.numdatanodes", 2);
+    DefaultMetricsSystem.setInstance(new FakeMetricsSystem());
 
-    Configuration conf = new Configuration();
-    conf.set("dfs.block.access.token.enable", "false");
-    conf.set("dfs.permissions.enabled", "false");
-    conf.set("hadoop.security.authentication", "simple");
+    Configuration conf = getBasicConfiguration(new Configuration());
     conf.set("hdfs.minidfs.basedir", dir + File.separator + "hdfsBaseDir");
     conf.set("dfs.namenode.name.dir", dir + File.separator + "nameNodeNameDir");
-    conf.setBoolean("fs.hdfs.impl.disable.cache", true);
+    // Disable metrics logging for HDFS
+    conf.setInt("dfs.namenode.metrics.logger.period.seconds", 0);
+    conf.setInt("dfs.datanode.metrics.logger.period.seconds", 0);
 
     System.setProperty("test.build.data", dir + File.separator + "hdfs" + File.separator + "build");
     System.setProperty("test.cache.data", dir + File.separator + "hdfs" + File.separator + "cache");
     System.setProperty("solr.lock.type", DirectoryFactory.LOCK_TYPE_HDFS);
 
-    System.setProperty("solr.hdfs.blockcache.global", Boolean.toString(LuceneTestCase.random().nextBoolean()));
+    // test-files/solr/solr.xml sets this to be 15000. This isn't long enough for HDFS in some cases.
+    System.setProperty("socketTimeout", "90000");
 
-    final MiniDFSCluster dfsCluster;
-
-    if (!haTesting) {
-      dfsCluster = new MiniDFSCluster.Builder(conf).numDataNodes(dataNodes).format(true).build();
-
-      System.setProperty("solr.hdfs.home", getDataDir(dfsCluster, "solr_hdfs_home"));
+    String blockcacheGlobal = System.getProperty("solr.hdfs.blockcache.global", Boolean.toString(random().nextBoolean()));
+    System.setProperty("solr.hdfs.blockcache.global", blockcacheGlobal);
+    // Limit memory usage for HDFS tests
+    if(Boolean.parseBoolean(blockcacheGlobal)) {
+      System.setProperty("solr.hdfs.blockcache.blocksperbank", "4096");
     } else {
-      dfsCluster = new MiniDFSCluster.Builder(conf)
-          .nnTopology(MiniDFSNNTopology.simpleHATopology()).numDataNodes(dataNodes)
-          .build();
-
-      Configuration haConfig = getClientConfiguration(dfsCluster);
-
-      HdfsUtil.TEST_CONF = haConfig;
-      System.setProperty("solr.hdfs.home", getDataDir(dfsCluster, "solr_hdfs_home"));
+      System.setProperty("solr.hdfs.blockcache.blocksperbank", "512");
+      System.setProperty("tests.hdfs.numdatanodes", "1");
     }
+
+    int dataNodes = Integer.getInteger("tests.hdfs.numdatanodes", 2);
+    final MiniDFSCluster.Builder dfsClusterBuilder = new MiniDFSCluster.Builder(conf)
+        .numDataNodes(dataNodes).format(true);
+    if (haTesting) {
+      dfsClusterBuilder.nnTopology(MiniDFSNNTopology.simpleHATopology());
+    }
+
+    MiniDFSCluster dfsCluster = dfsClusterBuilder.build();
+    HdfsUtil.TEST_CONF = getClientConfiguration(dfsCluster);
+    System.setProperty("solr.hdfs.home", getDataDir(dfsCluster, "solr_hdfs_home"));
 
     dfsCluster.waitActive();
 
     if (haTesting) dfsCluster.transitionToActive(0);
 
-    int rndMode = LuceneTestCase.random().nextInt(3);
+    int rndMode = random().nextInt(3);
     if (safeModeTesting && rndMode == 1) {
       NameNodeAdapter.enterSafeMode(dfsCluster.getNameNode(), false);
 
-      int rnd = LuceneTestCase.random().nextInt(10000);
+      int rnd = random().nextInt(10000);
       Timer timer = new Timer();
-      timers.put(dfsCluster, timer);
+      synchronized (TIMERS_LOCK) {
+        if (timers == null) {
+          timers = new HashMap<>();
+        }
+        timers.put(dfsCluster, timer);
+      }
       timer.schedule(new TimerTask() {
 
         @Override
@@ -150,11 +222,15 @@ public class HdfsTestUtil {
           NameNodeAdapter.leaveSafeMode(dfsCluster.getNameNode());
         }
       }, rnd);
-
     } else if (haTesting && rndMode == 2) {
-      int rnd = LuceneTestCase.random().nextInt(30000);
+      int rnd = random().nextInt(30000);
       Timer timer = new Timer();
-      timers.put(dfsCluster, timer);
+      synchronized (TIMERS_LOCK) {
+        if (timers == null) {
+          timers = new HashMap<>();
+        }
+        timers.put(dfsCluster, timer);
+      }
       timer.schedule(new TimerTask() {
 
         @Override
@@ -175,7 +251,7 @@ public class HdfsTestUtil {
       URI uri = dfsCluster.getURI();
       Path hdfsDirPath = new Path(uri.toString() + "/solr/collection1/core_node1/data/tlog/tlog.0000000000000000000");
       // tran log already being created testing
-      badTlogOutStreamFs = FileSystem.get(hdfsDirPath.toUri(), conf);
+      badTlogOutStreamFs = FileSystem.get(hdfsDirPath.toUri(), getClientConfiguration(dfsCluster));
       badTlogOutStream = badTlogOutStreamFs.create(hdfsDirPath);
     }
 
@@ -184,36 +260,55 @@ public class HdfsTestUtil {
     return dfsCluster;
   }
 
+  private static Configuration getBasicConfiguration(Configuration conf) {
+    conf.setBoolean("dfs.block.access.token.enable", false);
+    conf.setBoolean("dfs.permissions.enabled", false);
+    conf.set("hadoop.security.authentication", "simple");
+    conf.setBoolean("fs.hdfs.impl.disable.cache", true);
+    return conf;
+  }
+
   public static Configuration getClientConfiguration(MiniDFSCluster dfsCluster) {
-    if (dfsCluster.getNameNodeInfos().length > 1) {
-      Configuration conf = new Configuration();
+    Configuration conf = getBasicConfiguration(dfsCluster.getConfiguration(0));
+    if (dfsCluster.getNumNameNodes() > 1) {
       HATestUtil.setFailoverConfigurations(dfsCluster, conf);
-      return conf;
-    } else {
-      return new Configuration();
     }
+    return conf;
   }
 
   public static void teardownClass(MiniDFSCluster dfsCluster) throws Exception {
+    HdfsUtil.TEST_CONF = null;
 
     if (badTlogOutStream != null) {
       IOUtils.closeQuietly(badTlogOutStream);
+      badTlogOutStream = null;
     }
 
     if (badTlogOutStreamFs != null) {
       IOUtils.closeQuietly(badTlogOutStreamFs);
+      badTlogOutStreamFs = null;
     }
 
-    SolrTestCaseJ4.resetFactory();
-
     try {
+      try {
+        SolrTestCaseJ4.resetFactory();
+      } catch (Exception e) {
+        log.error("Exception trying to reset solr.directoryFactory", e);
+      }
       if (dfsCluster != null) {
-        Timer timer = timers.remove(dfsCluster);
-        if (timer != null) {
-          timer.cancel();
+        synchronized (TIMERS_LOCK) {
+          if (timers != null) {
+            Timer timer = timers.remove(dfsCluster);
+            if (timer != null) {
+              timer.cancel();
+            }
+            if (timers.isEmpty()) {
+              timers = null;
+            }
+          }
         }
         try {
-          dfsCluster.shutdown();
+          dfsCluster.shutdown(true);
         } catch (Error e) {
           // Added in SOLR-7134
           // Rarely, this can fail to either a NullPointerException
@@ -223,16 +318,27 @@ public class HdfsTestUtil {
         }
       }
     } finally {
-      System.clearProperty("solr.lock.type");
       System.clearProperty("test.build.data");
       System.clearProperty("test.cache.data");
-      System.clearProperty("solr.hdfs.home");
-      System.clearProperty("solr.hdfs.blockcache.global");
+
+      System.clearProperty("socketTimeout");
+
+      System.clearProperty("tests.hdfs.numdatanodes");
+
+      System.clearProperty("solr.lock.type");
+
+      // Clear "solr.hdfs." system properties
+      Enumeration<?> propertyNames = System.getProperties().propertyNames();
+      while(propertyNames.hasMoreElements()) {
+        String propertyName = String.valueOf(propertyNames.nextElement());
+        if(propertyName.startsWith("solr.hdfs.")) {
+          System.clearProperty(propertyName);
+        }
+      }
     }
   }
 
-  public static String getDataDir(MiniDFSCluster dfsCluster, String dataDir)
-      throws IOException {
+  public static String getDataDir(MiniDFSCluster dfsCluster, String dataDir) {
     if (dataDir == null) {
       return null;
     }
@@ -249,7 +355,7 @@ public class HdfsTestUtil {
       return "hdfs://" + logicalName;
     } else {
       URI uri = dfsCluster.getURI(0);
-      return uri.toString() ;
+      return uri.toString();
     }
   }
 
@@ -271,6 +377,17 @@ public class HdfsTestUtil {
   private static class SecurityManagerWorkerThread extends ForkJoinWorkerThread {
     SecurityManagerWorkerThread(ForkJoinPool pool) {
       super(pool);
+    }
+  }
+
+  /**
+   * Ensures that we don't try to initialize metrics and read files outside
+   * the source tree.
+   */
+  public static class FakeMetricsSystem extends MetricsSystemImpl {
+    @Override
+    public synchronized MetricsSystem init(String prefix) {
+      return this;
     }
   }
 }

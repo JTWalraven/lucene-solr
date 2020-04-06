@@ -162,6 +162,8 @@ public abstract class BaseMergePolicyTestCase extends LuceneTestCase {
       }
     };
 
+    private Set<SegmentCommitInfo> mergingSegments = Collections.emptySet();
+
     public MockMergeContext(ToIntFunction<SegmentCommitInfo> numDeletesFunc) {
       this.numDeletesFunc = numDeletesFunc;
     }
@@ -183,7 +185,11 @@ public abstract class BaseMergePolicyTestCase extends LuceneTestCase {
 
     @Override
     public Set<SegmentCommitInfo> getMergingSegments() {
-      return Collections.emptySet();
+      return mergingSegments;
+    }
+
+    public void setMergingSegments(Set<SegmentCommitInfo> mergingSegments) {
+      this.mergingSegments = mergingSegments;
     }
   }
 
@@ -271,6 +277,10 @@ public abstract class BaseMergePolicyTestCase extends LuceneTestCase {
       throw new UnsupportedOperationException();
     }
 
+    @Override
+    public Set<String> getPendingDeletions() throws IOException {
+      throw new UnsupportedOperationException();
+    }
   };
 
   /**
@@ -378,7 +388,8 @@ public abstract class BaseMergePolicyTestCase extends LuceneTestCase {
    * Simulate an update use-case where documents are uniformly updated across segments.
    */
   public void testSimulateUpdates() throws IOException {
-    doTestSimulateUpdates(mergePolicy(), 10_000_000, 2500);
+    int numDocs = atLeast(1_000_000);
+    doTestSimulateUpdates(mergePolicy(), numDocs, 2500);
   }
 
   /**
@@ -393,7 +404,14 @@ public abstract class BaseMergePolicyTestCase extends LuceneTestCase {
     SegmentInfos segmentInfos = new SegmentInfos(Version.LATEST.major);
     final double avgDocSizeMB = 5. / 1024; // 5kB
     for (int numDocs = 0; numDocs < totalDocs; ) {
-      int flushDocCount = TestUtil.nextInt(random(), 1, maxDocsPerFlush);
+      final int flushDocCount;
+      if (usually()) {
+        // reasonable value
+        flushDocCount = TestUtil.nextInt(random(), maxDocsPerFlush/2, maxDocsPerFlush);
+      } else {
+        // crazy value
+        flushDocCount = TestUtil.nextInt(random(), 1, maxDocsPerFlush);
+      }
       // how many of these documents are actually updates
       int delCount = (int) (flushDocCount * 0.9 * numDocs / totalDocs);
       numDocs += flushDocCount - delCount;

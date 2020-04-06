@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -44,6 +45,7 @@ import org.apache.lucene.analysis.util.CharFilterFactory;
 import org.apache.lucene.analysis.util.ResourceLoaderAware;
 import org.apache.lucene.analysis.util.TokenFilterFactory;
 import org.apache.lucene.analysis.util.TokenizerFactory;
+import org.apache.lucene.util.Version;
 import org.apache.solr.analysis.TokenizerChain;
 import org.apache.solr.client.solrj.SolrClient;
 import org.apache.solr.client.solrj.SolrRequest;
@@ -80,7 +82,7 @@ import org.xml.sax.InputSource;
 /** Solr-managed schema - non-user-editable, but can be mutable via internal and external REST API requests. */
 public final class ManagedIndexSchema extends IndexSchema {
 
-  private boolean isMutable = false;
+  private final boolean isMutable;
 
   @Override public boolean isMutable() { return isMutable; }
 
@@ -95,14 +97,12 @@ public final class ManagedIndexSchema extends IndexSchema {
   /**
    * Constructs a schema using the specified resource name and stream.
    *
-   * @see org.apache.solr.core.SolrResourceLoader#openSchema
-   *      By default, this follows the normal config path directory searching rules.
+   * By default, this follows the normal config path directory searching rules.
    * @see org.apache.solr.core.SolrResourceLoader#openResource
    */
-  ManagedIndexSchema(SolrConfig solrConfig, String name, InputSource is, boolean isMutable, 
-                     String managedSchemaResourceName, int schemaZkVersion, Object schemaUpdateLock) 
-      throws KeeperException, InterruptedException {
-    super(solrConfig, name, is);
+  ManagedIndexSchema(SolrConfig solrConfig, String name, InputSource is, boolean isMutable,
+                     String managedSchemaResourceName, int schemaZkVersion, Object schemaUpdateLock) {
+    super(name, is, solrConfig.luceneMatchVersion, solrConfig.getResourceLoader(), solrConfig.getSubstituteProperties());
     this.isMutable = isMutable;
     this.managedSchemaResourceName = managedSchemaResourceName;
     this.schemaZkVersion = schemaZkVersion;
@@ -654,7 +654,7 @@ public final class ManagedIndexSchema extends IndexSchema {
           System.arraycopy(newSchema.dynamicFields, dfPos + 1, temp, dfPos, newSchema.dynamicFields.length - dfPos - 1);
           newSchema.dynamicFields = temp;
         } else {
-          newSchema.dynamicFields = new DynamicField[0];
+          newSchema.dynamicFields = new DynamicField[] {};
         }
       }
       // After removing all dynamic fields, rebuild affected dynamic copy fields.
@@ -840,29 +840,31 @@ public final class ManagedIndexSchema extends IndexSchema {
     boolean found = false;
 
     if (null == destSchemaField || null == sourceSchemaField) { // Must be dynamic copy field
-      if (dynamicCopyFields != null) {
-        for (int i = 0 ; i < dynamicCopyFields.length ; ++i) {
-          DynamicCopy dynamicCopy = dynamicCopyFields[i];
-          if (source.equals(dynamicCopy.getRegex()) && dest.equals(dynamicCopy.getDestFieldName())) {
-            found = true;
-            SchemaField destinationPrototype = dynamicCopy.getDestination().getPrototype();
-            if (copyFieldTargetCounts.containsKey(destinationPrototype)) {
-              decrementCopyFieldTargetCount(destinationPrototype);
-            }
-            if (dynamicCopyFields.length > 1) {
-              DynamicCopy[] temp = new DynamicCopy[dynamicCopyFields.length - 1];
-              System.arraycopy(dynamicCopyFields, 0, temp, 0, i);
-              // skip over the dynamic copy field to be deleted
-              System.arraycopy(dynamicCopyFields, i + 1, temp, i, dynamicCopyFields.length - i - 1);
-              dynamicCopyFields = temp;
-            } else {
-              dynamicCopyFields = null;
-            }
-            break;
+      for (int i = 0; i < dynamicCopyFields.length; ++i) {
+        DynamicCopy dynamicCopy = dynamicCopyFields[i];
+        if (source.equals(dynamicCopy.getRegex()) && dest.equals(dynamicCopy.getDestFieldName())) {
+          found = true;
+          SchemaField destinationPrototype = dynamicCopy.getDestination().getPrototype();
+          if (copyFieldTargetCounts.containsKey(destinationPrototype)) {
+            decrementCopyFieldTargetCount(destinationPrototype);
           }
+          if (dynamicCopyFields.length > 1) {
+            DynamicCopy[] temp = new DynamicCopy[dynamicCopyFields.length - 1];
+            System.arraycopy(dynamicCopyFields, 0, temp, 0, i);
+            // skip over the dynamic copy field to be deleted
+            System.arraycopy(dynamicCopyFields, i + 1, temp, i, dynamicCopyFields.length - i - 1);
+            dynamicCopyFields = temp;
+          } else {
+            dynamicCopyFields = new DynamicCopy[] {};
+          }
+          break;
         }
       }
-    } else { // non-dynamic copy field directive
+    }
+
+    if (!found) {
+      // non-dynamic copy field directive.
+      // Here, source field could either exists in schema or match a dynamic rule
       List<CopyField> copyFieldList = copyFieldsMap.get(source);
       if (copyFieldList != null) {
         for (Iterator<CopyField> iter = copyFieldList.iterator() ; iter.hasNext() ; ) {
@@ -1320,10 +1322,9 @@ public final class ManagedIndexSchema extends IndexSchema {
     }
   }
   
-  private ManagedIndexSchema(final SolrConfig solrConfig, final SolrResourceLoader loader, boolean isMutable,
-                             String managedSchemaResourceName, int schemaZkVersion, Object schemaUpdateLock) 
-      throws KeeperException, InterruptedException {
-    super(solrConfig, loader);
+  private ManagedIndexSchema(Version luceneVersion, SolrResourceLoader loader, boolean isMutable,
+                             String managedSchemaResourceName, int schemaZkVersion, Object schemaUpdateLock, Properties substitutableProps) {
+    super(luceneVersion, loader, substitutableProps);
     this.isMutable = isMutable;
     this.managedSchemaResourceName = managedSchemaResourceName;
     this.schemaZkVersion = schemaZkVersion;
@@ -1340,22 +1341,9 @@ public final class ManagedIndexSchema extends IndexSchema {
    * @return A shallow copy of this schema
    */
    ManagedIndexSchema shallowCopy(boolean includeFieldDataStructures) {
-    ManagedIndexSchema newSchema = null;
-    try {
-      newSchema = new ManagedIndexSchema
-          (solrConfig, loader, isMutable, managedSchemaResourceName, schemaZkVersion, getSchemaUpdateLock());
-    } catch (KeeperException e) {
-      final String msg = "Error instantiating ManagedIndexSchema";
-      log.error(msg, e);
-      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, msg, e);
-    } catch (InterruptedException e) {
-      // Restore the interrupted status
-      Thread.currentThread().interrupt();
-      log.warn("", e);
-    }
+     ManagedIndexSchema newSchema = new ManagedIndexSchema
+         (luceneVersion, loader, isMutable, managedSchemaResourceName, schemaZkVersion, getSchemaUpdateLock(), substitutableProperties);
 
-    assert newSchema != null;
-    
     newSchema.name = name;
     newSchema.version = version;
     newSchema.similarity = similarity;
