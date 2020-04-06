@@ -1,6 +1,6 @@
 ================priv_key2048.pem===================
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key2048.pem runtimelibs.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key2048.pem runtimelibs.jar.bin | openssl enc -base64
 
 NaTm3+i99/ZhS8YRsLc3NLz2Y6VuwEbu7DihY8GAWwWIGm+jpXgn1JiuaenfxFCc
 fNKCC9WgZmEgbTZTzmV/OZMVn90u642YJbF3vTnzelW1pHB43ZRAJ1iesH0anM37
@@ -10,7 +10,7 @@ KJghhyBxPIC/2fkAHobQpkhZrXu56JjP+v33ul3Ku4bbvfVMY/LVwCAEnxlvhk+C
 6uRCKCeFMrzQ/k5inasXLw==
 
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key2048.pem runtimelibs_v2.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key2048.pem runtimelibs_v2.jar.bin | openssl enc -base64
 
 jsPpNMs74ogRbx9M4n/OH3j3s85KOq9dOtgGJkUf6O5D8T9d9zU2lDwxnTYjQCaW
 cRTLGH3Z8vpc0wyT3g4aXepgLUTSnrepbPffSFhQtFrCNxurPOLzbp6ERhwjZ0RL
@@ -19,7 +19,7 @@ GvZrlbbjR2SxqZ3BpHiGxslj0tPCkdevNCEy1glLhl8RWG5xsLCrRL1mrEtLg97A
 pXWm+Em2f5TO/bkOh2m/UInGXcNHCa0oqRMGKP1H252Cv9eXm/d0h3Dqxv+f80Gz
 LfyA6/OKQ9FfskY4pltCsQ==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key2048.pem runtimelibs_v3.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key2048.pem runtimelibs_v3.jar.bin | openssl enc -base64
 
 
 YxFr6SpYrDwG85miDfRWHTjU9UltjtIWQZEhcV55C2rczRUVowCYBxmsDv5mAM8j
@@ -32,40 +32,40 @@ FuLxHK7ciB5t0+q6pXlF/tdlDqF76Abze0R3d2/0MhXBzyNp3UxJmj6DiprgysfB
 YxFr6SpYrDwG85miDfRWHTjU9UltjtIWQZEhcV55C2rczRUVowCYBxmsDv5mAM8j0CTv854xpI1DtBT86wpoTdbF95LQuP9FJId4TS1j8bZ9cxHP5Cqyz1uBHFfUUNUrnpzTHQkVTp02O9NAjh3c2W41bL4U7j6jQ32+4CW2M+x00TDG0y0H75rQDR8zbLt31oWCz+sBOdZ3rGKJgAvdoGm/wVCTmsabZN+xoz4JaDeBXF16O9Uk9SSq4G0dz5YXFuLxHK7ciB5t0+q6pXlF/tdlDqF76Abze0R3d2/0MhXBzyNp3UxJmj6DiprgysfB0TbQtJG0XGfdSmx0VChvcA==
 
 =====================priv_key512.pem=====================
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem runtimelibs.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem runtimelibs.jar.bin | openssl enc -base64
 
 L3q/qIGs4NaF6JiO0ZkMUFa88j0OmYc+I6O7BOdNuMct/xoZ4h73aZHZGc0+nmI1
 f/U3bOlMPINlSOM6LK3JpQ==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem runtimelibs_v2.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem runtimelibs_v2.jar.bin | openssl enc -base64
 
 j+Rflxi64tXdqosIhbusqi6GTwZq8znunC/dzwcWW0/dHlFGKDurOaE1Nz9FSPJu
 XbHkVLj638yZ0Lp1ssnoYA==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem runtimelibs_v3.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem runtimelibs_v3.jar.bin | openssl enc -base64
 
 a400n4T7FT+2gM0SC6+MfSOExjud8MkhTSFylhvwNjtWwUgKdPFn434Wv7Qc4QEq
 DVLhQoL3WqYtQmLPti0G4Q==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem cache.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem cache.jar.bin | openssl enc -base64
 
 A2CDnReirpII005KRN1C3pvt4NM4kItsagQPNaa3ljj/5R3LKVgiPuNvqBsffU8n
 81LOAfr5VMyGFcb4QMHpyg==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem cache_v2.jar.bin | openssl enc -base64
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem cache_v2.jar.bin | openssl enc -base64
 
 SOrekHt+uup+z2z+nZU5indk2huRRfmbM+W+vQ0variHrcZEG9EXt5LuPFl8Ki9A
 hr6klMHdVP8nj4wuQhu/Hg==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem testurp_v1.jar.bin | openssl enc -base64 | tr -d \\n | sed
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem testurp_v1.jar.bin | openssl enc -base64 | tr -d \\n | sed
 
 h6UmMzuPqu4hQFGLBMJh/6kDSEXpJlgLsQDXx0KuxXWkV5giilRP57K3towiJRh2J+rqihqIghNCi3YgzgUnWQ==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem testurp_v2.jar.bin | openssl enc -base64 | openssl enc -base64 | tr -d \\n | sed
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem testurp_v2.jar.bin | openssl enc -base64 | openssl enc -base64 | tr -d \\n | sed
 
 P/ptFXRvQMd4oKPvadSpd+A9ffwY3gcex5GVFVRy3df0/OF8XT5my8rQz7FZva+2ORbWxdXS8NKwNrbPVHLGXw==
 
-openssl dgst -sha1 -sign ../cryptokeys/priv_key512.pem expressible.jar.bin | openssl enc -base64 | openssl enc -base64 | tr -d \\n | sed
+openssl dgst -sha512 -sign ../cryptokeys/priv_key512.pem expressible.jar.bin | openssl enc -base64 | openssl enc -base64 | tr -d \\n | sed
 
 ZOT11arAiPmPZYOHzqodiNnxO9pRyRozWZEBX8XGjU1/HJptFnZK+DI7eXnUtbNaMcbXE2Ze8hh4M/eGyhY8BQ==
 

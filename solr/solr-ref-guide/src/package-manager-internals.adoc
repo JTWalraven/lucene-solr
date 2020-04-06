@@ -99,7 +99,7 @@ $ curl -o runtimelibs.jar   -LO https://github.com/apache/lucene-solr/blob/maste
 +
 [source, bash]
 ----
-$ openssl dgst -sha1 -sign my_key.pem runtimelibs.jar | openssl enc -base64 | sed 's/+/%2B/g' | tr -d \\n | sed
+$ openssl dgst -sha512 -sign my_key.pem runtimelibs.jar | openssl enc -base64 | sed 's/+/%2B/g' | tr -d \\n | sed
 ----
 
 . Upload your jar with signature, replacing the `sig` parameter with the output from the previous command:
@@ -290,7 +290,7 @@ $ curl http://localhost:8983/solr/gettingstarted/test?omitHeader=true
 ----
 $ curl -o runtimelibs3.jar   -LO https://github.com/apache/lucene-solr/blob/master/solr/core/src/test-files/runtimecode/runtimelibs_v3.jar.bin?raw=true
 
-$ openssl dgst -sha1 -sign my_key.pem runtimelibs.jar | openssl enc -base64 | sed 's/+/%2B/g' | tr -d \\n | sed
+$ openssl dgst -sha512 -sign my_key.pem runtimelibs.jar | openssl enc -base64 | sed 's/+/%2B/g' | tr -d \\n | sed
 
 $ curl --data-binary @runtimelibs3.jar -X PUT  http://localhost:8983/api/cluster/files/mypkg/2.0/myplugins.jar?sig=<signature>
 ----

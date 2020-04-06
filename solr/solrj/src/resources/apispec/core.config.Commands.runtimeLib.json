@@ -13,7 +13,7 @@
     },
     "sig": {
       "type": "string",
-      "description": "The sha1 signature of the .jar, if it was signed before uploading. If you signed the sha1 digest of your .jar file prior to uploading it to the .system collection, this is where you need to provide the signature."
+      "description": "The sha512 signature of the .jar, if it was signed before uploading. If you signed the sha512 digest of your .jar file prior to uploading it to the .system collection, this is where you need to provide the signature."
     }
   },
   "required": [

@@ -272,11 +272,11 @@ After this, any attempt to load a jar will fail. All your jars must be signed wi
 
 === Step 4: Sign the jar File
 
-Next you need to sign the sha1 digest of your jar file and get the base64 string.
+Next you need to sign the sha512 digest of your jar file and get the base64 string.
 
 [source,bash]
 ----
-$ openssl dgst -sha1 -sign priv_key.pem myjar.jar | openssl enc -base64
+$ openssl dgst -sha512 -sign priv_key.pem myjar.jar | openssl enc -base64
 ----
 
 The output of this step will be a string that you will need to add the jar to your classpath in Step 6 below.
